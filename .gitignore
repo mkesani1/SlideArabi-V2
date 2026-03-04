@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pptx
+*.pdf
+*.jpg
+*.png
+translations_cache_llm/
+.env
