@@ -27,6 +27,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# OOXML NAMESPACE CONSTANTS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 NSMAP = {
     'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
     'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
@@ -37,25 +41,38 @@ A_NS = NSMAP['a']
 P_NS = NSMAP['p']
 R_NS = NSMAP['r']
 
-DEFAULT_FONT_SIZE_PT = 18.0
-DEFAULT_FONT_NAME = 'Calibri'
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# DEFAULT FALLBACK VALUES (PowerPoint built-in defaults)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DEFAULT_FONT_SIZE_PT = 18.0    # PowerPoint's ultimate default
+DEFAULT_FONT_NAME = 'Calibri'  # Office default since 2007
 DEFAULT_BOLD = False
 DEFAULT_ITALIC = False
 DEFAULT_UNDERLINE = False
-DEFAULT_ALIGNMENT = 'l'
+DEFAULT_ALIGNMENT = 'l'        # left
 DEFAULT_RTL = False
 DEFAULT_LEVEL = 0
 DEFAULT_ROTATION = 0.0
 
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# VALID ENUMERATIONS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 VALID_ALIGNMENTS = frozenset({'l', 'r', 'ctr', 'just', 'dist'})
+
 VALID_SHAPE_TYPES = frozenset({
     'placeholder', 'textbox', 'picture', 'chart', 'table',
     'group', 'connector', 'freeform', 'ole', 'smartart', 'media',
 })
+
 VALID_PLACEHOLDER_TYPES = frozenset({
     'title', 'body', 'ctrTitle', 'subTitle', 'dt', 'ftr', 'sldNum',
     'pic', 'chart', 'tbl', 'dgm', 'media', 'clipArt', 'obj',
 })
+
 VALID_LAYOUT_TYPES = frozenset({
     'title', 'tx', 'twoColTx', 'obj', 'secHead', 'blank', 'tbl',
     'chart', 'txAndChart', 'picTx', 'cust', 'titleOnly', 'twoObj',
@@ -65,14 +82,30 @@ VALID_LAYOUT_TYPES = frozenset({
     'twoObjAndObj', 'twoObjOverTx', 'txAndTwoObj', 'twoTxTwoObj',
     'txOverObj2', 'objOverTx2',
 })
+
 VALID_SOURCE_LEVELS = frozenset({'master', 'layout', 'slide'})
+
+# Labels for the 7-level inheritance chain (used in source_font_size_level)
 INHERITANCE_LEVELS = (
-    'run', 'paragraph', 'textframe', 'shape', 'layout', 'master', 'txstyles', 'default',
+    'run',           # Level 1: a:rPr on the run
+    'paragraph',     # Level 2: a:pPr/a:defRPr
+    'textframe',     # Level 3: a:lstStyle on shape's text body
+    'shape',         # Level 4: shape-level inline or lstStyle
+    'layout',        # Level 5: layout placeholder
+    'master',        # Level 6: master placeholder
+    'txstyles',      # Level 7: master p:txStyles (title/body/other)
+    'default',       # Fallback: hardcoded PowerPoint default
 )
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# RESOLVED MODELS — Immutable Phase 0 snapshot
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 @dataclass(frozen=True)
 class ResolvedRun:
+    """A single text run with all properties fully resolved through the 7-level
+    OOXML inheritance chain."""
     text: str
     effective_font_size_pt: float
     effective_font_name: str
@@ -85,6 +118,7 @@ class ResolvedRun:
 
 @dataclass(frozen=True)
 class ResolvedParagraph:
+    """A paragraph with all properties resolved, containing resolved runs."""
     runs: Tuple[ResolvedRun, ...]
     effective_alignment: str
     effective_rtl: bool
@@ -97,6 +131,8 @@ class ResolvedParagraph:
 
 @dataclass(frozen=True)
 class ResolvedShape:
+    """A shape with all text/formatting properties resolved from the inheritance
+    chain, plus positional information in EMU."""
     shape_id: int
     shape_name: str
     shape_type: str
@@ -116,6 +152,7 @@ class ResolvedShape:
 
     @property
     def full_text(self) -> str:
+        """Concatenate all run text across all paragraphs."""
         parts = []
         for para in self.paragraphs:
             para_text = ''.join(r.text for r in para.runs)
@@ -124,11 +161,13 @@ class ResolvedShape:
 
     @property
     def is_placeholder(self) -> bool:
+        """True if this shape is a placeholder."""
         return self.shape_type == 'placeholder'
 
 
 @dataclass(frozen=True)
 class ResolvedLayout:
+    """A fully resolved slide layout with its placeholders and shapes."""
     layout_name: str
     layout_type: str
     master_index: int
@@ -138,6 +177,7 @@ class ResolvedLayout:
 
 @dataclass(frozen=True)
 class ResolvedMaster:
+    """A fully resolved slide master."""
     master_name: str
     master_index: int
     placeholders: Tuple[ResolvedShape, ...]
@@ -147,6 +187,7 @@ class ResolvedMaster:
 
 @dataclass(frozen=True)
 class ResolvedSlide:
+    """A fully resolved slide with all shapes property-resolved."""
     slide_number: int
     layout_name: str
     layout_type: str
@@ -157,6 +198,8 @@ class ResolvedSlide:
 
 @dataclass(frozen=True)
 class ResolvedPresentation:
+    """The complete resolved presentation — an immutable snapshot produced by
+    PropertyResolver in Phase 0."""
     slide_width_emu: int
     slide_height_emu: int
     masters: Tuple[ResolvedMaster, ...]
@@ -165,22 +208,38 @@ class ResolvedPresentation:
 
     @property
     def total_shapes(self) -> int:
+        """Total number of shapes across all slides."""
         return sum(len(s.shapes) for s in self.slides)
 
     @property
     def total_slides(self) -> int:
+        """Number of slides."""
         return len(self.slides)
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TRANSFORM PLANNING MODELS — Mutable, for Phase 2/3
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 VALID_ACTION_TYPES = frozenset({
-    'mirror', 'swap', 'keep', 'right_align', 'center_align', 'set_rtl',
-    'set_font', 'resize_font', 'reverse_columns', 'reverse_axes',
-    'set_language', 'remove_position',
+    'mirror',
+    'swap',
+    'keep',
+    'right_align',
+    'center_align',
+    'set_rtl',
+    'set_font',
+    'resize_font',
+    'reverse_columns',
+    'reverse_axes',
+    'set_language',
+    'remove_position',
 })
 
 
 @dataclass
 class TransformAction:
+    """A single atomic transformation to apply to a shape."""
     shape_id: int
     action_type: str
     params: Dict[str, Any] = field(default_factory=dict)
@@ -195,22 +254,30 @@ class TransformAction:
 
 @dataclass
 class TransformPlan:
+    """A mutable plan of transformations for an entire presentation."""
     slide_actions: Dict[int, List[TransformAction]] = field(default_factory=dict)
     master_actions: Dict[int, List[TransformAction]] = field(default_factory=dict)
-    layout_actions: Dict[Tuple[int, int], List[TransformAction]] = field(default_factory=dict)
+    layout_actions: Dict[Tuple[int, int], List[TransformAction]] = field(
+        default_factory=dict
+    )
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def add_slide_action(self, slide_number: int, action: TransformAction) -> None:
+        """Add a transform action for a specific slide."""
         if slide_number not in self.slide_actions:
             self.slide_actions[slide_number] = []
         self.slide_actions[slide_number].append(action)
 
     def add_master_action(self, master_index: int, action: TransformAction) -> None:
+        """Add a transform action for a specific master."""
         if master_index not in self.master_actions:
             self.master_actions[master_index] = []
         self.master_actions[master_index].append(action)
 
-    def add_layout_action(self, master_index: int, layout_index: int, action: TransformAction) -> None:
+    def add_layout_action(
+        self, master_index: int, layout_index: int, action: TransformAction
+    ) -> None:
+        """Add a transform action for a specific layout."""
         key = (master_index, layout_index)
         if key not in self.layout_actions:
             self.layout_actions[key] = []
@@ -218,17 +285,23 @@ class TransformPlan:
 
     @property
     def total_actions(self) -> int:
+        """Total number of actions across all targets."""
         count = sum(len(v) for v in self.slide_actions.values())
         count += sum(len(v) for v in self.master_actions.values())
         count += sum(len(v) for v in self.layout_actions.values())
         return count
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# VALIDATION MODELS — Phase 5 output
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 VALID_SEVERITIES = frozenset({'error', 'warning', 'info'})
 
 
 @dataclass(frozen=True)
 class ValidationIssue:
+    """A single validation issue found during Phase 5 structural validation."""
     severity: str
     slide_number: int
     shape_id: Optional[int]
@@ -240,26 +313,32 @@ class ValidationIssue:
 
 @dataclass(frozen=True)
 class ValidationReport:
+    """Complete validation report from Phase 5."""
     issues: Tuple[ValidationIssue, ...]
     total_shapes_checked: int = 0
     total_slides_checked: int = 0
 
     @property
     def error_count(self) -> int:
+        """Number of error-severity issues."""
         return sum(1 for i in self.issues if i.severity == 'error')
 
     @property
     def warning_count(self) -> int:
+        """Number of warning-severity issues."""
         return sum(1 for i in self.issues if i.severity == 'warning')
 
     @property
     def info_count(self) -> int:
+        """Number of info-severity issues."""
         return sum(1 for i in self.issues if i.severity == 'info')
 
     @property
     def has_errors(self) -> bool:
+        """True if any error-severity issues exist."""
         return self.error_count > 0
 
     @property
     def passed(self) -> bool:
+        """True if no errors were found (warnings are acceptable)."""
         return not self.has_errors
