@@ -7,6 +7,8 @@ from pptx import Presentation
 
 logger = logging.getLogger(__name__)
 
+# These modules are built by other agents and will be available at runtime
+# Import them at the top but handle ImportError gracefully for testing
 try:
     from slideshift_v2.property_resolver import PropertyResolver
     from slideshift_v2.layout_analyzer import LayoutAnalyzer
@@ -21,6 +23,7 @@ try:
 except ImportError as e:
     logger.warning(f"Some v2 modules not yet available: {e}")
     
+    # Stub models for development/testing if real ones aren't available
     @dataclass
     class PipelineConfig:
         input_path: str
@@ -44,38 +47,67 @@ except ImportError as e:
 class SlideShiftV2Pipeline:
     """
     Template-first, deterministic RTL transformation pipeline.
-    Phase 0: Parse & Resolve
-    Phase 1: Translate
-    Phase 2: Master & Layout Transform
-    Phase 3: Slide Content Transform
-    Phase 4: Typography Normalization
-    Phase 5: Structural Validation
+    
+    Phases execute as a DAG — each phase runs exactly once and produces
+    immutable output consumed by subsequent phases. No fix loops.
+    
+    Phase 0: Parse & Resolve → ResolvedPresentation
+    Phase 1: Translate (AI) → translation_map
+    Phase 2: Master & Layout Transformation (deterministic) → TransformedPresentation
+    Phase 3: Slide Content Transformation (deterministic) → TransformedPresentation
+    Phase 4: Typography Normalization (deterministic) → FinalPresentation
+    Phase 5: Structural Validation (read-only) → ValidationReport
     """
     
     def __init__(self, config: 'PipelineConfig'):
         self.config = config
         self._phase_reports = {}
+        
+        # Configure logging
         numeric_level = getattr(logging, config.log_level.upper(), logging.INFO)
         logger.setLevel(numeric_level)
         
     def run(self) -> 'PipelineResult':
+        """
+        Execute the full pipeline. Returns PipelineResult.
+        
+        This is synchronous. Each phase completes before the next begins.
+        Phases are NOT async because there's no I/O wait between them
+        (except Phase 1 translation which calls an external API).
+        """
         pipeline_start = time.monotonic()
         logger.info(f"Starting SlideShift v2 pipeline for {self.config.input_path}")
         
         try:
+            # 1. Load presentation
+            logger.info("Loading presentation...")
             try:
                 prs = Presentation(self.config.input_path)
             except Exception as e:
                 raise ValueError(f"Failed to load presentation: {e}")
             
+            # Phase 0: Parse & Resolve
             resolved_prs = self._phase_0_resolve(prs)
+            
+            # Phase 1: Translate
             translation_map = self._phase_1_translate(resolved_prs)
+            
+            # Phase 2: Transform Masters & Layouts
             p2_report = self._phase_2_transform_masters_layouts(prs, resolved_prs)
+            
+            # Phase 3: Transform Slide Content
             p3_report = self._phase_3_transform_slides(prs, resolved_prs, translation_map)
+            
+            # Phase 4: Typography Normalization
             p4_report = self._phase_4_typography(prs)
+            
+            # Phase 5: Validate
             val_report = self._phase_5_validate(prs, resolved_prs)
             
+            # Save presentation
+            logger.info(f"Saving transformed presentation to {self.config.output_path}...")
             try:
+                # Ensure directory exists
                 Path(self.config.output_path).parent.mkdir(parents=True, exist_ok=True)
                 prs.save(self.config.output_path)
             except Exception as e:
@@ -95,6 +127,7 @@ class SlideShiftV2Pipeline:
         except Exception as e:
             logger.error(f"Pipeline failed: {e}", exc_info=True)
             total_duration = (time.monotonic() - pipeline_start) * 1000
+            
             return PipelineResult(
                 success=False,
                 output_path=None,
@@ -104,103 +137,169 @@ class SlideShiftV2Pipeline:
                 error=str(e)
             )
         
-    def _phase_0_resolve(self, prs):
+    def _phase_0_resolve(self, prs: Presentation) -> Any:
+        """Phase 0: Parse the presentation and resolve all inherited properties."""
         start_time = time.monotonic()
+        logger.info("Phase 0: Resolving properties...")
+        
         try:
             resolver = PropertyResolver(prs)
             resolved_prs = resolver.resolve_presentation()
+            
+            # Optionally add layout analysis here if needed for phase 0 output
+            analyzer = LayoutAnalyzer()
+            # analyzer could mutate or wrap resolved_prs
+            
             duration = (time.monotonic() - start_time) * 1000
             self._log_phase('phase_0_resolve', duration, {"status": "success", "slides_resolved": len(prs.slides)})
             return resolved_prs
+            
         except NameError as e:
+            # Fallback if modules aren't available for tests
             logger.warning(f"Phase 0 stubbed: {e}")
             self._log_phase('phase_0_resolve', 0, {"status": "stubbed"})
             return None
             
-    def _phase_1_translate(self, resolved):
+    def _phase_1_translate(self, resolved: Any) -> Dict[str, str]:
+        """Phase 1: Extract text and call translation function."""
         start_time = time.monotonic()
+        logger.info("Phase 1: Translation...")
+        
         if self.config.skip_translation:
+            logger.info("Translation skipped per config.")
             self._log_phase('phase_1_translate', 0, {"status": "skipped"})
             return {}
+            
         if not self.config.translate_fn:
+            logger.warning("No translation function provided.")
             self._log_phase('phase_1_translate', 0, {"status": "no_function"})
             return {}
+            
         texts_to_translate = self._extract_texts(resolved)
+        logger.info(f"Extracted {len(texts_to_translate)} strings for translation.")
+        
         try:
             translation_map = self.config.translate_fn(texts_to_translate)
+            
             duration = (time.monotonic() - start_time) * 1000
-            self._log_phase('phase_1_translate', duration, {"status": "success", "strings_translated": len(translation_map)})
+            self._log_phase('phase_1_translate', duration, {
+                "status": "success", 
+                "strings_translated": len(translation_map)
+            })
             return translation_map
+            
         except Exception as e:
+            logger.error(f"Translation failed: {e}")
             raise RuntimeError(f"Phase 1 (Translation) failed: {e}")
         
-    def _phase_2_transform_masters_layouts(self, prs, resolved):
+    def _phase_2_transform_masters_layouts(self, prs: Presentation, resolved: Any) -> Any:
+        """Phase 2: Transform masters and layouts deterministically."""
         start_time = time.monotonic()
+        logger.info("Phase 2: Transforming masters and layouts...")
+        
         try:
             registry = TemplateRegistry()
             transformer = MasterLayoutTransformer(prs, registry)
+            
             transformer.transform_all_masters()
             report = transformer.transform_all_layouts()
+            
             duration = (time.monotonic() - start_time) * 1000
             self._log_phase('phase_2_transform_masters', duration, {"status": "success"})
             return report
+            
         except NameError as e:
             logger.warning(f"Phase 2 stubbed: {e}")
             self._log_phase('phase_2_transform_masters', 0, {"status": "stubbed"})
             return None
         
-    def _phase_3_transform_slides(self, prs, resolved, translations):
+    def _phase_3_transform_slides(self, prs: Presentation, resolved: Any, translations: Dict[str, str]) -> Any:
+        """Phase 3: Transform slide content deterministically."""
         start_time = time.monotonic()
+        logger.info("Phase 3: Transforming slide content...")
+        
         try:
+            # Layout analyzer might be needed to get classifications
             analyzer = LayoutAnalyzer()
             layout_classifications = analyzer.classify_slides(prs)
+            
             transformer = SlideContentTransformer(prs, layout_classifications, translations)
             report = transformer.transform_all_slides()
+            
             duration = (time.monotonic() - start_time) * 1000
             self._log_phase('phase_3_transform_slides', duration, {"status": "success"})
             return report
+            
         except NameError as e:
             logger.warning(f"Phase 3 stubbed: {e}")
             self._log_phase('phase_3_transform_slides', 0, {"status": "stubbed"})
             return None
         
-    def _phase_4_typography(self, prs):
+    def _phase_4_typography(self, prs: Presentation) -> Any:
+        """Phase 4: Normalize typography for Arabic."""
         start_time = time.monotonic()
+        logger.info("Phase 4: Normalizing typography...")
+        
         try:
             normalizer = TypographyNormalizer(prs, max_reduction_pct=self.config.max_font_reduction_pct)
             report = normalizer.normalize_all()
+            
             duration = (time.monotonic() - start_time) * 1000
             self._log_phase('phase_4_typography', duration, {"status": "success"})
             return report
+            
         except NameError as e:
             logger.warning(f"Phase 4 stubbed: {e}")
             self._log_phase('phase_4_typography', 0, {"status": "stubbed"})
             return None
         
-    def _phase_5_validate(self, prs, resolved):
+    def _phase_5_validate(self, prs: Presentation, resolved: Any) -> Any:
+        """Phase 5: Read-only structural validation."""
         start_time = time.monotonic()
+        logger.info("Phase 5: Structural validation...")
+        
         try:
             validator = StructuralValidator(prs, resolved)
             report = validator.validate()
+            
             duration = (time.monotonic() - start_time) * 1000
-            self._log_phase('phase_5_validate', duration, {"status": "success", "passed": report.passed})
+            
+            log_data = {
+                "status": "success",
+                "passed": report.passed,
+                "errors": report.errors,
+                "warnings": report.warnings
+            }
+            self._log_phase('phase_5_validate', duration, log_data)
+            
+            if not report.passed:
+                logger.warning(f"Validation failed with {report.errors} errors.")
+                # We don't fail the pipeline, just report it
+                
             return report
+            
         except NameError as e:
             logger.warning(f"Phase 5 stubbed: {e}")
             self._log_phase('phase_5_validate', 0, {"status": "stubbed"})
             return None
         
-    def _extract_texts(self, resolved):
+    def _extract_texts(self, resolved: Any) -> List[str]:
+        """Extract all translatable text strings from the resolved presentation."""
         texts = []
         if not resolved:
             return texts
+            
         try:
+            # Assuming resolved is a ResolvedPresentation with slides -> shapes -> paragraphs -> runs
             for slide in resolved.slides:
                 for shape in slide.shapes:
                     for para in shape.paragraphs:
+                        # Combine runs into a single translatable string per paragraph
                         para_text = "".join(run.text for run in para.runs if run.text).strip()
                         if para_text:
                             texts.append(para_text)
+                            
+            # Deduplicate while preserving order
             seen = set()
             unique_texts = []
             for t in texts:
@@ -208,9 +307,16 @@ class SlideShiftV2Pipeline:
                     seen.add(t)
                     unique_texts.append(t)
             return unique_texts
+            
         except AttributeError:
+            # Fallback if resolved structure isn't exactly as expected
+            logger.warning("Could not extract texts from resolved presentation structure")
             return []
         
-    def _log_phase(self, phase_name, duration_ms, report):
-        self._phase_reports[phase_name] = {"duration_ms": duration_ms, "report": report}
+    def _log_phase(self, phase_name: str, duration_ms: float, report: Any):
+        """Log phase completion with timing and summary."""
+        self._phase_reports[phase_name] = {
+            "duration_ms": duration_ms,
+            "report": report
+        }
         logger.debug(f"{phase_name} completed in {duration_ms:.1f}ms: {report}")
