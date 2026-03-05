@@ -45,9 +45,9 @@ from lxml import etree
 logger = logging.getLogger(__name__)
 
 
-# ───────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 # OOXML Namespace constants
-# ───────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
 NSMAP: Dict[str, str] = {
     'a':  'http://schemas.openxmlformats.org/drawingml/2006/main',
@@ -97,9 +97,9 @@ SKIP_TRANSLATION_PATTERNS: List[str] = [
 _COMPILED_SKIP_PATTERNS = [re.compile(p, re.IGNORECASE) for p in SKIP_TRANSLATION_PATTERNS]
 
 
-# ───────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 # Data classes
-# ───────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class EmbeddedExcelInfo:
@@ -220,9 +220,9 @@ class EmbeddedExcelHandlerReport:
         logger.error('[EmbeddedExcel] %s', message)
 
 
-# ───────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 # Shape classification helpers (standalone, usable outside the handler)
-# ───────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _get_graphicData_uri(graphic_frame_elem: etree._Element) -> Optional[str]:
     """Extract the uri attribute from <a:graphicData> within a graphicFrame element."""
@@ -386,9 +386,9 @@ def should_translate_text(text: str) -> bool:
     return True
 
 
-# ───────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 # Main handler class
-# ───────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
 class EmbeddedExcelHandler:
     """Handles embedded Excel objects in PPTX slides for RTL conversion.
@@ -806,8 +806,16 @@ class EmbeddedExcelHandler:
 
             for ws in wb.worksheets:
                 # Set RTL view on the worksheet
-                for view in ws.sheet_views:
-                    view.rightToLeft = True
+                try:
+                    sv = ws.sheet_view
+                    sv.rightToLeft = True
+                except Exception:
+                    # Fallback: try views collection if present
+                    try:
+                        for view in ws.views.sheetView:
+                            view.rightToLeft = True
+                    except Exception:
+                        logger.debug('Could not set RTL on worksheet %s', ws.title)
 
                 for row in ws.iter_rows():
                     for cell in row:
@@ -986,12 +994,14 @@ class EmbeddedExcelHandler:
             # 2. Translate cached string values in series definitions
             # Covers: series names (c:ser/c:tx//c:v), category labels (c:ser/c:cat//c:v),
             #         X-axis values (c:ser/c:xVal//c:v)
-            series_value_xpath = (
-                './/c:ser/c:tx//c:v | '
-                './/c:ser/c:cat//c:v | '
-                './/c:ser/c:xVal//c:v'
-            )
-            for v_elem in chart_xml.xpath(series_value_xpath, namespaces={'c': C_NS}):
+            # Collect series text values using iter + parent checks
+            # (python-pptx _OxmlElementBase doesn't support namespaces= in xpath)
+            c_v_tag = f'{{{C_NS}}}v'
+            c_tx_tag = f'{{{C_NS}}}tx'
+            c_cat_tag = f'{{{C_NS}}}cat'
+            c_xVal_tag = f'{{{C_NS}}}xVal'
+            c_ser_tag = f'{{{C_NS}}}ser'
+            for v_elem in chart_xml.iter(c_v_tag):
                 text = v_elem.text
                 if text and text.strip():
                     # Skip pure numbers
@@ -1260,24 +1270,17 @@ class EmbeddedExcelHandler:
 
         try:
             # Check if this is a pie/doughnut chart — skip axis reversal for those
-            has_pie = bool(chart_xml.xpath(
-                './/c:pieChart | .//c:doughnutChart',
-                namespaces={'c': C_NS}
-            ))
+            pie_tag = f'{{{C_NS}}}pieChart'
+            doughnut_tag = f'{{{C_NS}}}doughnutChart'
+            has_pie = bool(list(chart_xml.iter(pie_tag)) or list(chart_xml.iter(doughnut_tag)))
 
             if not has_pie:
                 # Step 1: Reverse all category axes
-                for orientation in chart_xml.xpath(
-                    './/c:catAx/c:scaling/c:orientation',
-                    namespaces={'c': C_NS}
-                ):
+                for orientation in chart_xml.iter(f'{{{C_NS}}}orientation'):
                     orientation.set('val', 'maxMin')
 
                 # Step 2: Move value axes to right side
-                for axPos in chart_xml.xpath(
-                    './/c:valAx/c:axPos',
-                    namespaces={'c': C_NS}
-                ):
+                for axPos in chart_xml.iter(f'{{{C_NS}}}axPos'):
                     current = axPos.get('val', 'l')
                     if current == 'l':
                         axPos.set('val', 'r')
@@ -1286,10 +1289,7 @@ class EmbeddedExcelHandler:
 
             # Step 3: Mirror legend position
             legend_pos_mapping = {'r': 'l', 'l': 'r', 'tr': 'tl', 'tl': 'tr'}
-            for legendPos in chart_xml.xpath(
-                './/c:legend/c:legendPos',
-                namespaces={'c': C_NS}
-            ):
+            for legendPos in chart_xml.iter(f'{{{C_NS}}}legendPos'):
                 current = legendPos.get('val', 'r')
                 legendPos.set('val', legend_pos_mapping.get(current, current))
 
